@@ -89,7 +89,7 @@ def main():
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+    kwargs = {'num_workers': 0, 'pin_memory': True} if use_cuda else {}
     train_loader = torch.utils.data.DataLoader(
         datasets.MNIST('../data', train=True, download=True,
                        transform=transforms.Compose([
@@ -449,7 +449,10 @@ model.load_state_dict(torch.load("mnist_cnn.pt"))
 model.eval()
 q_model = copy.deepcopy(model)
 
-kwargs = {'num_workers': 4, 'pin_memory': True}
+# for param in model.parameters():
+#     print(param.nelement())
+
+kwargs = {'num_workers': 0, 'pin_memory': True}
 test_loader = torch.utils.data.DataLoader(
     datasets.MNIST('../data', train=False, transform=transforms.Compose([
                        transforms.ToTensor(),
