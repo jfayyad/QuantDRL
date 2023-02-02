@@ -489,7 +489,7 @@ def getReward(bitwidth_):
     else:
         reward_acc = - math.log(error)
 
-    reward_bits = (8.0 - bitwidth_[1][0]) + (8.0 - bitwidth_[2][0])
+    reward_bits = ((500/25500)*(8.0 - bitwidth_[1][0])) + ((25000/25500)*(8.0 - bitwidth_[2][0]))
 
     return reward_acc, reward_bits
 
