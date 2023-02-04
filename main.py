@@ -458,7 +458,7 @@ test_loader = torch.utils.data.DataLoader(
                        transforms.ToTensor(),
                        transforms.Normalize((0.1307,), (0.3081,))
                    ])),
-    batch_size=64, shuffle=True, **kwargs)
+    batch_size=10, shuffle=True, **kwargs)
 
 # testQuant(q_model, test_loader, quant=False)
 
@@ -470,7 +470,7 @@ test_loader = torch.utils.data.DataLoader(
 # bitwidth = [a, [w, b, a], [w, b, a], [w, b, a]]
 
 # Custom bitwidth: ['input', 'conv1','conv2','fc1' ] ; e.g., conv1 => weight, bias, activation for next layer (input)
-bitwidth = [8, [1, 8, 8], [2, 8, 8], [8, 8, 8]]
+bitwidth = [8, [8, 8, 8], [8, 8, 8], [8, 8, 8]]
 
 per_ch_conv1 = False
 per_ch_conv2 = False
