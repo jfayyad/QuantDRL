@@ -305,7 +305,7 @@ def updateStats(x, stats, key):
     else:
         stats[key]['max'] += max_val.sum().item()
         stats[key]['min'] += min_val.sum().item()
-        stats[key]['total'] += 1
+        stats[key]['total'] = 10000 #This should be changed to len(dataste)
 
     return stats
 
