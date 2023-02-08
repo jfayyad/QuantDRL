@@ -114,7 +114,7 @@ def main():
         test(args, model, device, test_loader)
 
     if (save_model):
-        torch.save(model.state_dict(), "mnist_cnn.pt")
+        torch.save(model.state_dict(), "Y_mnist_cnn.pt")
 
     return model
 
@@ -445,7 +445,7 @@ def quant_WB(bits_conv):
 
 # #################################### Get Accuracy of Non Quantised Model #################################### #
 model = Net()
-model.load_state_dict(torch.load("mnist_cnn.pt"))
+model.load_state_dict(torch.load("Y_mnist_cnn.pt"))
 model.eval()
 q_model = copy.deepcopy(model)
 

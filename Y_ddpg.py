@@ -28,7 +28,7 @@ from keras import layers
 
 import matplotlib.pyplot as plt
 
-from main import *
+from Y_mainOld import *
 
 
 ################## Parameters ##################
