@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from QuantLayerRes import quantizeConvBnRelu, quantizeConvBn, quantizeFc
 from QuantFunc import quantize_tensor, dequantize_tensor
 import numpy as np
+from Dataset import MyDataset
 
 def residu(L_out_xq, L_residualq):
     dq_out_xq = dequantize_tensor(L_out_xq[0], L_out_xq[1], L_out_xq[2])
@@ -134,12 +135,43 @@ bitwidth = [8,                                                                  
             [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[5] = block3{conv1_conv2_downsample}
             [[8, 8], 8]                                                                     # bitwidth[6] = fc:[[w, b], act]
             ]
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ResNet(ResidualBlock, [2, 2, 2, 2])
 model.load_state_dict(torch.load("Res18.pt", map_location="cpu"))
+model = model.to(device)
 model.eval()
-x = torch.rand([1,3,224,224])
-out, out_quant = model(x)
-# print(out.shape)
-mean = ((out - out_quant) ** 2).mean(axis=1)
-print('\nMSE =', mean.detach().numpy())
+
+bs = 100
+n = 3
+l = bs*n
+
+
+dataset = MyDataset()
+kwargs = {'num_workers': 0, 'pin_memory': True}
+test_loader = torch.utils.data.DataLoader(dataset,batch_size=bs, shuffle=False, **kwargs)
+correct = 0
+correct_quant = 0
+
+for i, (data, target, idx) in enumerate(test_loader):
+    data,target = data.to(device), target.to(device)
+    out, out_quant = model(data)
+    pred_orig = out.argmax(dim=1, keepdim=True)
+    pred_quant = out_quant.argmax(dim=1, keepdim=True)
+    correct += pred_orig.eq(target.view_as(pred_orig)).sum().item()
+    correct_quant += pred_quant.eq(target.view_as(pred_quant)).sum().item()
+    if i == n-1:
+      break
+
+
+print('\n Original Accuracy: {}/{} ({:.0f}%)\n'.format(
+        correct, l,
+        100. * correct / l))
+
+print('\n Quantization Accuracy: {}/{} ({:.0f}%)\n'.format(
+        correct_quant, l,
+        100. * correct_quant / l))
+
+#
+# # print(out.shape)
+# mean = ((out - out_quant) ** 2).mean(axis=1)
+# print('\nMSE =', mean.detach().numpy())
