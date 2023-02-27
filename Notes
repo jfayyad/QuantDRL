@@ -1,6 +1,0 @@
-1. LeNet with MNIST
-2. Include all Layers (convs + fcs)
-3. Modify the States fromat (Observations) and analyze them
-4. Modify the Reward System and analyze it (layer-bitwidth-wise reward). Also, check KL-Div for the output layer or layer-wise
-5. Backward Pass for Kernel-wise quantization
-6. Try different DRL algorithms and compase 

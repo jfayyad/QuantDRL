@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
 
+batch_s = 500
 
 class Net(nn.Module):
     def __init__(self):
@@ -29,7 +30,7 @@ class Net(nn.Module):
         return F.log_softmax(x, dim=1)
 
 # model = Net()
-# # summary(model, input_size=(1, 1, 28, 28))
+# summary(model, input_size=(1, 1, 28, 28))
 # im = torch.rand([1,1,28,28])
 # out = model(im)
 # print(out.shape)

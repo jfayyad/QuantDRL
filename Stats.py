@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from Model import batch_s
 
 def updateStats(x, stats, key):
     max_val, _ = torch.max(x, dim=1)
@@ -11,7 +12,8 @@ def updateStats(x, stats, key):
         stats[key]['max'] += max_val.sum().item()
         stats[key]['min'] += min_val.sum().item()
         # stats[key]['total'] += 1
-        stats[key]['total'] =10000.0
+        # stats[key]['total'] += batch_s
+        stats[key]['total'] = 10000
 
     return stats
 

@@ -4,7 +4,7 @@ from collections import namedtuple
 
 """## Rework Forward pass of Linear and Conv Layers to support Quantisation"""
 import torch.nn.functional as F
-from QuantFunc import calcScaleZeroPoint, calcScaleZeroPointSym, quantize_tensor, quantize_tensor_sym
+from QuantFunc import calcScaleZeroPoint, calcScaleZeroPointSym, quantize_tensor, quantize_tensor_sym, dequantize_tensor
 
 def quantizeLayer(x, layer, stat, scale_x, zp_x, num_bits, vis=False, axs=None, X=None, y=None, sym=False):
     # for both conv and linear layers
@@ -40,9 +40,9 @@ def quantizeLayer(x, layer, stat, scale_x, zp_x, num_bits, vis=False, axs=None, 
     zp_b = b.zero_point
 
     if sym:
-        scale_next, zero_point_next = calcScaleZeroPointSym(min_val=stat['min'], max_val=stat['max'],num_bits=num_bits[2])
+        scale_next, zero_point_next = calcScaleZeroPointSym(min_val=stat['min'], max_val=stat['max'], num_bits=num_bits[2])
     else:
-        scale_next, zero_point_next = calcScaleZeroPoint(min_val=stat['min'], max_val=stat['max'],num_bits=num_bits[2])
+        scale_next, zero_point_next = calcScaleZeroPoint(min_val=stat['min'], max_val=stat['max'], num_bits=num_bits[2])
 
     # Preparing input by saturating range to num_bits range.
     if sym:
@@ -53,9 +53,6 @@ def quantizeLayer(x, layer, stat, scale_x, zp_x, num_bits, vis=False, axs=None, 
         X = x.float() - zp_x
         layer.weight.data = ((scale_x * scale_w) / scale_next) * (layer.weight.data - zp_w)
         layer.bias.data = (scale_b / scale_next) * (layer.bias.data - zp_b)
-
-        WA = layer.weight.data
-        BA = layer.bias.data
 
     # All int computation
     if sym:
@@ -76,12 +73,8 @@ def quantizeLayer(x, layer, stat, scale_x, zp_x, num_bits, vis=False, axs=None, 
     return x, scale_next, zero_point_next
 
 
-
-
 def quantizeConv(x, layer, stat, scale_x, zp_x, num_bits, vis=False, axs=None, X=None, y=None, sym=False):
     # for both conv and linear layers
-
-
 
     # cache old values
     W = layer.weight.data
