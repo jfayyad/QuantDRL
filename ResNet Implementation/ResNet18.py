@@ -6,6 +6,8 @@ from QuantFunc import quantize_tensor, dequantize_tensor
 import numpy as np
 from Dataset import MyDataset
 
+
+
 def residu(L_out_xq, L_residualq):
     dq_out_xq = dequantize_tensor(L_out_xq[0], L_out_xq[1], L_out_xq[2])
     dq_residualq = dequantize_tensor(L_residualq[0], L_residualq[1], L_residualq[2])
@@ -13,6 +15,58 @@ def residu(L_out_xq, L_residualq):
     dq_out_xq = F.relu(dq_out_xq)
     out_xq = quantize_tensor(dq_out_xq, 8)
     return out_xq.tensor, out_xq.scale, out_xq.zero_point
+
+def get_conv_act(layer):
+    filter_size = layer.shape[1]
+    act_layer = np.zeros((filter_size, bs))
+    layer = layer.reshape(layer.detach().numpy().shape[0], layer.detach().numpy().shape[1], -1)
+    for filter_it in range(layer.shape[1]):
+        layer_filter = layer[:, filter_it, :]
+        act_layer[filter_it, :] = np.mean(layer_filter.detach().numpy(), axis=1)
+    return act_layer
+
+def get_fc_act(layer):
+    filter_size = layer.shape[1]
+    act_layer = np.zeros((filter_size, bs))
+    for index in range(layer.shape[0]):
+        act_layer[:, index] = layer[index].detach().numpy()
+    return act_layer
+
+# global R
+
+
+
+
+def KLD(x,xq,sc,zp):
+
+
+    act = get_conv_act(x)
+    dq_xq = dequantize_tensor(xq, sc, zp)
+    Quant_act = get_conv_act(dq_xq)
+
+    mean_original = np.mean(act, axis=1)
+    std_original = np.std(act, axis=1)
+
+    mean_quant = np.mean(Quant_act, axis=1)
+    std_quant = np.std(Quant_act, axis=1)
+
+    alpha = 1e-10 #KL stability
+    KL = np.log10(((std_quant + alpha) / (std_original + alpha)) + (std_original ** 2 - std_quant ** 2 +
+                    (mean_original - mean_quant) ** 2) / ((2 * std_quant ** 2) + alpha))
+
+    R = np.mean(KL)
+
+    # # calculate the outliers for kernel-wise quantization:
+    # Q1 = np.quantile(KL, .25)
+    # Q3 = np.quantile(KL, .75)
+    # IQR = Q3 - Q1
+    # UL = Q3 + 1.5*IQR
+    # LL = 1e-4 #LL = Q1 - 1.5*IQR
+    # idx_uv = [i for i,v in enumerate(KL >= UL) if v]
+    # idx_lv = [i for i, v in enumerate(KL <= LL) if v]
+    return R
+
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, downsample=None):
@@ -74,6 +128,7 @@ class ResNet(nn.Module):
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.fc = nn.Linear(512, num_classes)
 
+
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes:
@@ -89,27 +144,36 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
+
     def forward(self, x):
+        Rkld = []
         ################################### CONV1 and CONV1 Quant ####################################
         xq = quantize_tensor(x, bitwidth[0])
         x = self.conv1(x)
         x = self.maxpool(x)
         xq, scale_next, zero_point_next = quantizeConvBnRelu(x, xq.tensor, self.conv1, xq.scale, xq.zero_point, bitwidth[1], bn_fake=Quant_BN)
         xq = self.maxpool(xq)
-        # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
+
+
+        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
+
 
         ################################### Blocks and Blocks Quant ###################################
         x, xq, scale_next, zero_point_next, _ = self.layer0([x, xq, scale_next, zero_point_next, bitwidth[2]])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
+        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         x, xq, scale_next, zero_point_next, _ = self.layer1([x, xq, scale_next, zero_point_next, bitwidth[3]])
         dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
+        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         x, xq, scale_next, zero_point_next, _ = self.layer2([x, xq, scale_next, zero_point_next, bitwidth[4]])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
+        Rkld.append(KLD(x, xq, scale_next, zero_point_next))
 
         x, xq, scale_next, zero_point_next, _ = self.layer3([x, xq, scale_next, zero_point_next, bitwidth[5]])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
+        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         ################################### FCs and FCs Quant ###################################
         x = self.avgpool(x)
@@ -121,7 +185,7 @@ class ResNet(nn.Module):
         xq, scale_next, zero_point_next = quantizeFc(x, xq, self.fc, scale_next, zero_point_next, bitwidth[6])
         xq = dequantize_tensor(xq, scale_next, zero_point_next)
 
-        return x, xq
+        return x, xq, Rkld
 
 
 ########## bitwidth #########
@@ -151,18 +215,27 @@ kwargs = {'num_workers': 0, 'pin_memory': True}
 test_loader = torch.utils.data.DataLoader(dataset,batch_size=bs, shuffle=False, **kwargs)
 correct = 0
 correct_quant = 0
+# Rconv = np.array([])
+# Rlayer0 = np.array([])
+# Rlayer1 = np.array([])
+# Rlayer2 = np.array([])
+# Rlayer3 = np.array([])
+R = []
 
 for i, (data, target, idx) in enumerate(test_loader):
     data,target = data.to(device), target.to(device)
-    out, out_quant = model(data)
+    out, out_quant, R_kld = model(data)
     pred_orig = out.argmax(dim=1, keepdim=True)
     pred_quant = out_quant.argmax(dim=1, keepdim=True)
     correct += pred_orig.eq(target.view_as(pred_orig)).sum().item()
     correct_quant += pred_quant.eq(target.view_as(pred_quant)).sum().item()
+    R.append(R_kld)
+
+
     if i == n-1:
       break
 
-
+Rmean = np.mean(R, axis=0)
 print('\n Original Accuracy: {}/{} ({:.0f}%)\n'.format(
         correct, l,
         100. * correct / l))
@@ -171,7 +244,10 @@ print('\n Quantization Accuracy: {}/{} ({:.0f}%)\n'.format(
         correct_quant, l,
         100. * correct_quant / l))
 
-#
-# # print(out.shape)
-# mean = ((out - out_quant) ** 2).mean(axis=1)
-# print('\nMSE =', mean.detach().numpy())
+
+
+
+
+
+
+
