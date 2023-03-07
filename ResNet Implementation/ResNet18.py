@@ -5,6 +5,7 @@ from QuantLayerRes import quantizeConvBnRelu, quantizeConvBn, quantizeFc
 from QuantFunc import quantize_tensor, dequantize_tensor
 import numpy as np
 from Dataset import MyDataset
+import cupy as cp
 
 
 
@@ -18,19 +19,20 @@ def residu(L_out_xq, L_residualq):
 
 def get_conv_act(layer):
     filter_size = layer.shape[1]
-    act_layer = np.zeros((filter_size, bs))
-    layer = layer.reshape(layer.detach().numpy().shape[0], layer.detach().numpy().shape[1], -1)
+    act_layer = torch.zeros((filter_size, bs))
+    layer = torch.reshape(layer, (layer.shape[0], layer.shape[1], -1))
+    # layer = layer.reshape(layer.numpy().shape[0], layer.numpy().shape[1], -1)
     for filter_it in range(layer.shape[1]):
         layer_filter = layer[:, filter_it, :]
-        act_layer[filter_it, :] = np.mean(layer_filter.detach().numpy(), axis=1)
+        act_layer[filter_it] = torch.mean(layer_filter, axis=1)
     return act_layer
 
-def get_fc_act(layer):
-    filter_size = layer.shape[1]
-    act_layer = np.zeros((filter_size, bs))
-    for index in range(layer.shape[0]):
-        act_layer[:, index] = layer[index].detach().numpy()
-    return act_layer
+# def get_fc_act(layer):
+#     filter_size = layer.shape[1]
+#     act_layer = np.zeros((filter_size, bs))
+#     for index in range(layer.shape[0]):
+#         act_layer[:, index] = layer[index].cpu().detach().numpy()
+#     return act_layer
 
 # global R
 
@@ -44,17 +46,17 @@ def KLD(x,xq,sc,zp):
     dq_xq = dequantize_tensor(xq, sc, zp)
     Quant_act = get_conv_act(dq_xq)
 
-    mean_original = np.mean(act, axis=1)
-    std_original = np.std(act, axis=1)
+    mean_original = torch.mean(act, axis=1)
+    std_original = torch.std(act, axis=1)
 
-    mean_quant = np.mean(Quant_act, axis=1)
-    std_quant = np.std(Quant_act, axis=1)
+    mean_quant = torch.mean(Quant_act, axis=1)
+    std_quant = torch.std(Quant_act, axis=1)
 
     alpha = 1e-10 #KL stability
-    KL = np.log10(((std_quant + alpha) / (std_original + alpha)) + (std_original ** 2 - std_quant ** 2 +
+    KL = torch.log10(((std_quant + alpha) / (std_original + alpha)) + (std_original ** 2 - std_quant ** 2 +
                     (mean_original - mean_quant) ** 2) / ((2 * std_quant ** 2) + alpha))
 
-    R = np.mean(KL)
+    R = torch.mean(KL)
 
     # # calculate the outliers for kernel-wise quantization:
     # Q1 = np.quantile(KL, .25)
@@ -64,7 +66,7 @@ def KLD(x,xq,sc,zp):
     # LL = 1e-4 #LL = Q1 - 1.5*IQR
     # idx_uv = [i for i,v in enumerate(KL >= UL) if v]
     # idx_lv = [i for i, v in enumerate(KL <= LL) if v]
-    return R
+    return R.item()
 
 
 
@@ -164,7 +166,7 @@ class ResNet(nn.Module):
         Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         x, xq, scale_next, zero_point_next, _ = self.layer1([x, xq, scale_next, zero_point_next, bitwidth[3]])
-        dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
+        # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
         Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         x, xq, scale_next, zero_point_next, _ = self.layer2([x, xq, scale_next, zero_point_next, bitwidth[4]])
@@ -190,59 +192,61 @@ class ResNet(nn.Module):
 
 ########## bitwidth #########
 
-Quant_BN = False
-bitwidth = [8,                                                                              # bitwidth[0] = input (act)
-            [[8, 8], 8, [8, 8], 8],                                                         # bitwidth[1] = conv1_bn1: [ conv1[w, b], act, bn[w, b], act]
-            [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[2] = block0{conv1_conv2_downsample}
-            [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[3] = block1{conv1_conv2_downsample}
-            [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[4] = block2{conv1_conv2_downsample}
-            [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[5] = block3{conv1_conv2_downsample}
-            [[8, 8], 8]                                                                     # bitwidth[6] = fc:[[w, b], act]
-            ]
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ResNet(ResidualBlock, [2, 2, 2, 2])
-model.load_state_dict(torch.load("Res18.pt", map_location="cpu"))
-model = model.to(device)
-model.eval()
+if __name__ == '__main__':
+    Quant_BN = False
+    bitwidth = [8,                                                                              # bitwidth[0] = input (act)
+                [[2, 8], 8, [8, 8], 8],                                                         # bitwidth[1] = conv1_bn1: [ conv1[w, b], act, bn[w, b], act]
+                [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[2] = block0{conv1_conv2_downsample}
+                [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[3] = block1{conv1_conv2_downsample}
+                [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[4] = block2{conv1_conv2_downsample}
+                [[[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8] , [[8, 8], 8, [8, 8], 8]],     # bitwidth[5] = block3{conv1_conv2_downsample}
+                [[8, 8], 8]                                                                     # bitwidth[6] = fc:[[w, b], act]
+                ]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
+    model = ResNet(ResidualBlock, [2, 2, 2, 2])
+    model.load_state_dict(torch.load("Res18.pt")) #, map_location="cpu"))
+    model = model.to(device)
+    model.eval()
 
-bs = 100
-n = 3
-l = bs*n
-
-
-dataset = MyDataset()
-kwargs = {'num_workers': 0, 'pin_memory': True}
-test_loader = torch.utils.data.DataLoader(dataset,batch_size=bs, shuffle=False, **kwargs)
-correct = 0
-correct_quant = 0
-# Rconv = np.array([])
-# Rlayer0 = np.array([])
-# Rlayer1 = np.array([])
-# Rlayer2 = np.array([])
-# Rlayer3 = np.array([])
-R = []
-
-for i, (data, target, idx) in enumerate(test_loader):
-    data,target = data.to(device), target.to(device)
-    out, out_quant, R_kld = model(data)
-    pred_orig = out.argmax(dim=1, keepdim=True)
-    pred_quant = out_quant.argmax(dim=1, keepdim=True)
-    correct += pred_orig.eq(target.view_as(pred_orig)).sum().item()
-    correct_quant += pred_quant.eq(target.view_as(pred_quant)).sum().item()
-    R.append(R_kld)
+    bs = 200
+    n = 5
+    l = bs*n
 
 
-    if i == n-1:
-      break
+    dataset = MyDataset()
+    kwargs = {'num_workers': 0, 'pin_memory': True}
+    test_loader = torch.utils.data.DataLoader(dataset,batch_size=bs, shuffle=False, **kwargs)
+    correct = 0
+    correct_quant = 0
+    # Rconv = np.array([])
+    # Rlayer0 = np.array([])
+    # Rlayer1 = np.array([])
+    # Rlayer2 = np.array([])
+    # Rlayer3 = np.array([])
+    R = []
 
-Rmean = np.mean(R, axis=0)
-print('\n Original Accuracy: {}/{} ({:.0f}%)\n'.format(
-        correct, l,
-        100. * correct / l))
+    for i, (data, target, idx) in enumerate(test_loader):
+        data,target = data.to(device), target.to(device)
+        out, out_quant, R_kld = model(data)
+        pred_orig = out.argmax(dim=1, keepdim=True)
+        pred_quant = out_quant.argmax(dim=1, keepdim=True)
+        correct += pred_orig.eq(target.view_as(pred_orig)).sum().item()
+        correct_quant += pred_quant.eq(target.view_as(pred_quant)).sum().item()
+        R.append(R_kld)
 
-print('\n Quantization Accuracy: {}/{} ({:.0f}%)\n'.format(
-        correct_quant, l,
-        100. * correct_quant / l))
+
+        if i == n-1:
+          break
+
+    Rmean = np.mean(R, axis=0)
+    print('\n Original Accuracy: {}/{} ({:.0f}%)\n'.format(
+            correct, l,
+            100. * correct / l))
+
+    print('\n Quantization Accuracy: {}/{} ({:.0f}%)\n'.format(
+            correct_quant, l,
+            100. * correct_quant / l))
 
 
 
