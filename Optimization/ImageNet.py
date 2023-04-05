@@ -3,7 +3,7 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
 def MyDataset():
-    path = "/home/rosen/Quantize/val"
+    path = "/home/jonah/PycharmProjects/ResNet_Quant/val"
 
     transform = transforms.Compose([
             transforms.Resize((224,224)),

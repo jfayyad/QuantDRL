@@ -41,7 +41,9 @@ def get_conv_act(layer):
 
 
 def KLD(x,xq,sc,zp):
-
+    global l_kld
+    global count
+    global KL_layer
 
     act = get_conv_act(x)
     dq_xq = dequantize_tensor(xq, sc, zp)
@@ -59,15 +61,28 @@ def KLD(x,xq,sc,zp):
 
     R = torch.mean(KL)
 
-    # # calculate the outliers for kernel-wise quantization:
-    # Q1 = np.quantile(KL, .25)
-    # Q3 = np.quantile(KL, .75)
-    # IQR = Q3 - Q1
-    # UL = Q3 + 1.5*IQR
-    # LL = 1e-4 #LL = Q1 - 1.5*IQR
-    # idx_uv = [i for i,v in enumerate(KL >= UL) if v]
-    # idx_lv = [i for i, v in enumerate(KL <= LL) if v]
+    if l_kld == count:
+        KL_layer = KL
+
+    count +=1
+
     return R.item()
+
+
+def KLD_quantile(KL):
+    # calculate the outliers for kernel-wise quantization:
+    Q1 = torch.quantile(KL, .25)
+    Q2 = torch.quantile(KL, .50)
+    Q3 = torch.quantile(KL, .75)
+    IQR = Q3 - Q1
+    UL = Q3 + 1.5*IQR
+    LL = Q1 # LL = 1e-5 #LL = Q1 - 1.5*IQR
+    val_uv = [KL[i] for i, v in enumerate(KL >= UL) if v]
+    val_lv = [KL[i] for i, v in enumerate(KL <= LL) if v]
+    idx_uv = [i for i, v in enumerate(KL >= UL) if v]
+    idx_lv = [i for i, v in enumerate(KL <= LL) if v]
+
+    return Q1, Q2, Q3, UL, LL, val_uv, val_lv, idx_uv, idx_lv
 
 
 
@@ -90,26 +105,28 @@ class BasicBlock(nn.Module):
         self.stride = stride
 
     def forward(self, z):
-        x, xq, scale_next, zero_point_next, bit_width, ResBlock = z[0], z[1], z[2], z[3], z[4], z[5]
+        x, xq, scale_next, zero_point_next, bit_width, ResBlock, Rkld = z[0], z[1], z[2], z[3], z[4], z[5], z[6]
         bits = bit_width[ResBlock]
 
         residual = x
         residualq = xq
 
         out = self.conv1(x)
-        out_xq, out_scale_next, out_zero_point_next = quantizeConvBnRelu(out, xq, [self.conv1,self.bn1], scale_next, zero_point_next, bits[0], bn_fake=Quant_BN)
+        out_xq, out_scale_next, out_zero_point_next = quantizeConvBnRelu(out, xq, [self.conv1,self.bn1], scale_next, zero_point_next, bits[0])
         out = self.bn1(out)
         out = self.relu(out)
         # dq_xq = dequantize_tensor(out_xq.clone().detach(), out_scale_next, out_zero_point_next)
+        Rkld.append(KLD(out, out_xq, scale_next, zero_point_next))
 
         out = self.conv2(out)
-        out_xq, out_scale_next, out_zero_point_next = quantizeConvBn(out, out_xq, [self.conv2,self.bn2], out_scale_next, out_zero_point_next, bits[1], bn_fake=Quant_BN)
+        out_xq, out_scale_next, out_zero_point_next = quantizeConvBn(out, out_xq, [self.conv2,self.bn2], out_scale_next, out_zero_point_next, bits[1])
         out = self.bn2(out)
         # dq_xq = dequantize_tensor(out_xq.clone().detach(), out_scale_next, out_zero_point_next)
+        Rkld.append(KLD(out, out_xq, out_scale_next, out_zero_point_next))
 
         if self.downsample:
             residual = self.downsample(x)
-            residualq, scale_next, zero_point_next = quantizeConvBn(x, residualq, self.downsample, scale_next, zero_point_next, bits[2], bn_fake=Quant_BN)
+            residualq, scale_next, zero_point_next = quantizeConvBn(x, residualq, self.downsample, scale_next, zero_point_next, bits[2])
 
         out += residual
         L_out_xq = [out_xq, out_scale_next, out_zero_point_next]
@@ -121,7 +138,7 @@ class BasicBlock(nn.Module):
 
         ResBlock += 1
 
-        return out, out_xq, out_scale_next, out_zero_point_next, bit_width, ResBlock
+        return out, out_xq, out_scale_next, out_zero_point_next, bit_width, ResBlock, Rkld
 
 
 class ResNet(nn.Module):
@@ -164,7 +181,7 @@ class ResNet(nn.Module):
         ################################### CONV1 and CONV1 Quant ####################################
         xq = quantize_tensor(x, bitwidth[0])
         x = self.conv1(x)
-        xq, scale_next, zero_point_next = quantizeConvBnRelu(x, xq.tensor, [self.conv1,self.bn1], xq.scale, xq.zero_point, bitwidth[1], bn_fake=Quant_BN)
+        xq, scale_next, zero_point_next = quantizeConvBnRelu(x, xq.tensor, [self.conv1,self.bn1], xq.scale, xq.zero_point, bitwidth[1])
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
@@ -173,21 +190,21 @@ class ResNet(nn.Module):
         Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         ################################### Blocks and Blocks Quant ###################################
-        x, xq, scale_next, zero_point_next, _, _ = self.layer1([x, xq, scale_next, zero_point_next, bitwidth[2], 0])
+        x, xq, scale_next, zero_point_next, _, _, Rkld = self.layer1([x, xq, scale_next, zero_point_next, bitwidth[2], 0, Rkld])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
-        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
+        # Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
-        x, xq, scale_next, zero_point_next, _, _ = self.layer2([x, xq, scale_next, zero_point_next, bitwidth[3], 0])
+        x, xq, scale_next, zero_point_next, _, _, Rkld  = self.layer2([x, xq, scale_next, zero_point_next, bitwidth[3], 0, Rkld])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
-        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
+        # Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
-        x, xq, scale_next, zero_point_next, _, _ = self.layer3([x, xq, scale_next, zero_point_next, bitwidth[4], 0])
+        x, xq, scale_next, zero_point_next, _, _, Rkld  = self.layer3([x, xq, scale_next, zero_point_next, bitwidth[4], 0, Rkld])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
-        Rkld.append(KLD(x, xq, scale_next, zero_point_next))
+        # Rkld.append(KLD(x, xq, scale_next, zero_point_next))
 
-        x, xq, scale_next, zero_point_next, _, _ = self.layer4([x, xq, scale_next, zero_point_next, bitwidth[5], 0])
+        x, xq, scale_next, zero_point_next, _, _, Rkld  = self.layer4([x, xq, scale_next, zero_point_next, bitwidth[5], 0, Rkld])
         # dq_xq = dequantize_tensor(xq.clone().detach(), scale_next, zero_point_next)
-        Rkld.append(KLD(x,xq,scale_next,zero_point_next))
+        # Rkld.append(KLD(x,xq,scale_next,zero_point_next))
 
         ################################### FCs and FCs Quant ###################################
         x = self.avgpool(x)
@@ -225,7 +242,8 @@ def acc_kl(num_bits):
     Rmean = np.mean(R, axis=0)
     print("  Original  Model Accuracy: {:.4f}".format(acc[0]))
     print("  Quantized Model Accuracy: {:.4f}".format(acc[1]))
-    print("  KL-D Values = [{}, {}, {}, {}, {}]".format(Rmean[0], Rmean[1], Rmean[2], Rmean[3], Rmean[4]))
+    print("  KL-D Values = {}".format(Rmean))
+    # print("  KL-D Values = [{}, {}, {}, {}, {}]".format(Rmean[0], Rmean[1], Rmean[2], Rmean[3], Rmean[4]))
     return acc, Rmean
 
 
@@ -234,46 +252,89 @@ def acc_kl(num_bits):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cpu")
 model = ResNet(BasicBlock, [2, 2, 2, 2])
-model.load_state_dict(torch.load("../resnet18-imgNet.pth"))
+model.load_state_dict(torch.load("../ResNet_ImgNet/resnet18-imgNet.pth"))
 model = model.to(device)
 model.eval()
 
-bs = 100
+bs = 20
 n = 1
 l = bs*n
 
-
 dataset = MyDataset()
-kwargs = {'num_workers': 2, 'pin_memory': True}
+kwargs = {'num_workers': 4, 'pin_memory': True}
 test_loader = torch.utils.data.DataLoader(dataset,batch_size=bs, shuffle=False, **kwargs)
 
 
 ########## bitwidth #########
 
-Quant_BN = False
-bitwidth_ = [8,                                                                                                                                   # bitwidth[0] = input (act)
-            [[8, 1], 8, [8, 8], 8],                                                                                                               # bitwidth[1] = conv1_bn1: [ conv1[w, b], act, bn[w, b], act]
-            [[[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8]],                            [[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] ]],   # bitwidth[2] = block0{conv1_conv2_downsample} x2
-            [[[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8]],   [[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] ]],   # bitwidth[3] = block1{conv1_conv2_downsample} x2
-            [[[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8]],   [[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] ]],   # bitwidth[4] = block2{conv1_conv2_downsample} x2
-            [[[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8]],   [[[8, 1], 8, [8, 8], 8] , [[8, 1], 8, [8, 8], 8] ]],   # bitwidth[5] = block3{conv1_conv2_downsample} x2
-            [[8, 1], 8]                                                                                                                           # bitwidth[6] = fc:[[w, b], act]
+def bit_width(b_w, b_a):
+    bitwidth = [8,                                                                                                 # bitwidth[0] = input (act)
+            [b_w[0], b_a[0]],                                                                                   # bitwidth[1] = conv1_bn1: conv1[w, act]
+            [[[b_w[1], b_a[1]] , [b_w[2], b_a[2]]],               [[b_w[3], b_a[3]] , [b_w[4], b_a[4]]]],       # bitwidth[2] = block0{conv1_conv2_downsample} x2
+            [[[b_w[5], b_a[5]] , [b_w[6], b_a[6]] , [8, 8]],      [[b_w[7], b_a[7]] , [b_w[8], b_a[8]]]],       # bitwidth[3] = block1{conv1_conv2_downsample} x2
+            [[[b_w[9], b_a[9]] , [b_w[10], b_a[10]] , [8, 8]],    [[b_w[11], b_a[11]] , [b_w[12], b_a[12]]]],   # bitwidth[4] = block2{conv1_conv2_downsample} x2
+            [[[b_w[13], b_a[13]] , [b_w[14], b_a[14]] , [8, 8]],  [[b_w[15], b_a[15]] , [b_w[16], b_a[16]]]],   # bitwidth[5] = block3{conv1_conv2_downsample} x2
+            [8, 8]                                                                                              # bitwidth[6] = fc:[w, act]
             ]
+    return bitwidth
 
-t = time.time()
+
+# KLD analysis for layer i:
+global l_kld
+global count
+count = 1
+global KL_layer
+
+
+# b_w = [8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]
+b_w = ([4]*17)
+b_a = [8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]
+
+bitwidth_  = bit_width(b_w, b_a)
+
+# Optimize Problem
+l_kld = 1                               # choose the layer that you want to perform channel-wise quantization on it
 accu, R = acc_kl(bitwidth_)
-print('R_total = ', - np.log10(np.sum(R)))
-elapsed = time.time() - t
-print('elapsed time =', elapsed)
+Q1, Q2, Q3, UL, LL, val_uv, val_lv, idx_uv, idx_lv= KLD_quantile(KL_layer)
 
+layer_size = KL_layer.shape[0]
+b_min = 1
+bw_l = b_w[l_kld-1]                     # layer-wise bit-width value
+bw_c = ([bw_l]*layer_size)              # Initial values of channel-wise bit-widths for layer i = layer-wise bit-width value
 
+for i, idx in enumerate(idx_uv):
+    for j in range(8-bw_l + 1):
+        if bw_c[idx] == 8: break
+        bw_c[idx] = bw_c[idx] + 1
+        b_w[l_kld-1] = bw_c                     # channel-wise bit-width
+        bitwidth_ = bit_width(b_w, b_a)
+        count = 1
+        accu, R = acc_kl(bitwidth_)
+        _, _, _, _, _, _, _, _, _ = KLD_quantile(KL_layer)
+        if KL_layer[idx] <= UL:
+            break
+        else:
+            continue
 
+for i, idx in enumerate(idx_lv):
+    bw_c[idx] = b_min - 1
+    for j in range(bw_l-2 + 1):
+        bw_c[idx] = bw_c[idx] + 1
+        b_w[l_kld-1] = bw_c                     # channel-wise bit-width
+        bitwidth_ = bit_width(b_w, b_a)
+        count = 1
+        accu, R = acc_kl(bitwidth_)
+        _, _, _, _, _, _, _, _, _ = KLD_quantile(KL_layer)
+        if KL_layer[idx] <= Q2:
+            break
+        else:
+            continue
 
+print('R = ', R)
+print('b_avg = ', np.mean(bw_c))
 
-
-
-
-
-
-
-
+# t = time.time()
+# accu, R = acc_kl(bitwidth_)
+# print('R_total = ', - np.log10(np.sum(R)))
+# elapsed = time.time() - t
+# print('elapsed time =', elapsed)
